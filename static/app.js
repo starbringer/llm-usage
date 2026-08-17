@@ -443,12 +443,18 @@ function renderChartEmpty(chart, text) {
   chart.setOption({ ...baseOption(), title: { text, left: 'center', top: 'middle', textStyle: { color: COLOR.dim, fontSize: 13, fontWeight: 'normal' } } });
 }
 
+// Every horizontal bar card here is fed a descending list, but ECharts anchors
+// category index 0 at the *bottom* of the y-axis — so a "top N" card would read
+// smallest-first. Reverse the rows to put the largest bar on top. Derive labels,
+// series and tooltips from the returned array, never from the original.
+const largestOnTop = rows => [...rows].reverse();
+
 function renderModelsChart(models) {
   const chart = initChart('chart-models');
   if (!chart) return;
   if (!models?.length) return renderChartEmpty(chart, 'No usage in this range');
-  const palette = [COLOR.input, COLOR.output, COLOR.cacheCreate, COLOR.cacheRead, '#f04d4d'];
-  const names = models.map(m => m.model.replace('claude-', '').replace(/-(\d)/g, ' $1'));
+  const rows = largestOnTop(models); // server returns them total-descending
+  const names = rows.map(m => m.model.replace('claude-', '').replace(/-(\d)/g, ' $1'));
   chart.setOption({
     ...baseOption(),
     grid: { left: 6, right: 16, top: 30, bottom: 6, containLabel: true },
@@ -456,10 +462,10 @@ function renderModelsChart(models) {
     xAxis: { type: 'value', axisLabel: { formatter: v => fmt.tokens(v), color: COLOR.dim }, splitLine: { lineStyle: { color: gridLine() } } },
     yAxis: { type: 'category', data: names, axisLabel: { color: COLOR.dim, fontSize: 11 } },
     series: [
-      { name: 'Input',       type: 'bar', stack: 's', data: models.map(m => m.input),                         itemStyle: { color: COLOR.input } },
-      { name: 'Output',      type: 'bar', stack: 's', data: models.map(m => m.output),                        itemStyle: { color: COLOR.output } },
-      { name: 'Cache write', type: 'bar', stack: 's', data: models.map(m => (m.cacheCreate5m ?? 0) + (m.cacheCreate1h ?? 0)), itemStyle: { color: COLOR.cacheCreate } },
-      { name: 'Cache read',  type: 'bar', stack: 's', data: models.map(m => m.cacheRead),                     itemStyle: { color: COLOR.cacheRead } },
+      { name: 'Input',       type: 'bar', stack: 's', data: rows.map(m => m.input),                         itemStyle: { color: COLOR.input } },
+      { name: 'Output',      type: 'bar', stack: 's', data: rows.map(m => m.output),                        itemStyle: { color: COLOR.output } },
+      { name: 'Cache write', type: 'bar', stack: 's', data: rows.map(m => (m.cacheCreate5m ?? 0) + (m.cacheCreate1h ?? 0)), itemStyle: { color: COLOR.cacheCreate } },
+      { name: 'Cache read',  type: 'bar', stack: 's', data: rows.map(m => m.cacheRead),                     itemStyle: { color: COLOR.cacheRead } },
     ],
     tooltip: { trigger: 'axis', formatter: ps => ps[0].name + '<br>' + ps.map(p => `${p.seriesName}: ${fmt.tokens(p.value)}`).join('<br>') },
   });
@@ -468,8 +474,8 @@ function renderModelsChart(models) {
 function renderProjectsChart(projects) {
   const chart = initChart('chart-projects');
   if (!chart) return;
-  const top = (projects ?? []).filter(p => p.totalTokens > 0)
-    .sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 10);
+  const top = largestOnTop((projects ?? []).filter(p => p.totalTokens > 0)
+    .sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 10));
   if (!top.length) return renderChartEmpty(chart, 'No usage in this range');
   const names = top.map(p => {
     const parts = (p.cwd ?? '').replace(/\\/g, '/').split('/');
@@ -501,7 +507,7 @@ function renderUsageBarChart(chartId, rows, color, emptyText, tooltipFor) {
   const chart = initChart(chartId);
   if (!chart) return;
   if (!rows?.length) return renderChartEmpty(chart, emptyText);
-  const top = rows.slice(0, 10).reverse(); // largest at the top of the bar chart
+  const top = largestOnTop(rows.slice(0, 10));
   chart.setOption({
     ...baseOption(),
     grid: { left: 6, right: 76, top: 8, bottom: 8, containLabel: true },
@@ -550,8 +556,7 @@ function renderTopRunsChart(runs) {
     return;
   }
 
-  // Reverse so the #1 run lands at the top of the horizontal bar chart
-  const rows = [...runs].reverse();
+  const rows = largestOnTop(runs);
   const labels = rows.map(s => {
     const t = (s.title ?? '').trim() || '(untitled)';
     const suffix = (s.agent_count ?? 1) > 1 ? `  · ${s.agent_count} agents` : '';
@@ -635,7 +640,7 @@ function renderModelMixChart(models) {
   if (!chart) return;
   if (!models?.length) return renderChartEmpty(chart, 'No usage in this range');
   const palette = [COLOR.blue, COLOR.orange, COLOR.purple, COLOR.green, COLOR.yellow];
-  const rows = [...models].reverse();
+  const rows = largestOnTop(models);
   const names = rows.map(m => m.model.replace('claude-', '').replace(/-(\d)/g, ' $1'));
   chart.setOption({ ...baseOption(),
     grid: { left: 6, right: 76, top: 14, bottom: 8, containLabel: true },
@@ -1405,8 +1410,11 @@ function renderRunUsage(r) {
 
   // Donut: estimated cost per bucket (cost is comparable across buckets;
   // raw token counts are distorted by cheap cache reads).
+  // Sorted by cost so the donut starts on the biggest slice — byBucket arrives
+  // in fixed key order, which would otherwise put a rounding-error slice first.
   const pieData = Object.entries(r.byBucket)
     .filter(([, v]) => v.costUsd > 0)
+    .sort((a, b) => b[1].costUsd - a[1].costUsd)
     .map(([k, v]) => ({ name: BUCKET_LABEL[k] ?? k, value: +v.costUsd.toFixed(4),
                         itemStyle: { color: BUCKET_COLOR[k] } }));
   const pie = initChart('chart-run-bucket');
