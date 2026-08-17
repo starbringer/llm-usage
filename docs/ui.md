@@ -18,6 +18,9 @@ conversation and configuration name replaced by consistent stand-ins — see
 
 ![Dashboard charts](screenshots/02-dashboard-charts.png)
 
+Every ranked bar chart reads largest-first, top down; the run-detail donut starts on
+its biggest slice.
+
 Every chart has its own range switcher — `1h` / `24h` / `7d` / `30d` — and remembers
 your choice. The ladder follows the [retention window](storage.md#data-retention) —
 a 14-day window offers `1h` / `24h` / `7d` / `14d`. Costs are API-equivalent
