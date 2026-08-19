@@ -150,14 +150,14 @@
           <div class="chart-row">
             <div class="chart-card">
               <div class="chart-card-head">
-                <div class="chart-card-title" title="Estimated from recorded MCP tool calls: input arguments + returned results, ~4 chars/token">MCP token usage <span class="title-note">est.</span></div>
+                <div class="chart-card-title" title="Tokens recorded on every API call made while each server was active. The tooltip also shows the estimated size of the call and result payloads.">MCP token usage</div>
                 <div class="range-group" data-chart="mcp"></div>
               </div>
               <div id="chart-mcp-usage" style="height:220px"></div>
             </div>
             <div class="chart-card">
               <div class="chart-card-head">
-                <div class="chart-card-title" title="Estimated from recorded Skill invocations: arguments + injected skill content, ~4 chars/token">Skill token usage <span class="title-note">est.</span></div>
+                <div class="chart-card-title" title="Tokens recorded on every API call made while each skill was running. The tooltip also shows the estimated size of the injected body.">Skill token usage</div>
                 <div class="range-group" data-chart="skills"></div>
               </div>
               <div id="chart-skill-usage" style="height:220px"></div>

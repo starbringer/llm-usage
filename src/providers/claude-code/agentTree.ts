@@ -94,6 +94,8 @@ interface RawEntry {
   timestamp?: string;
   isSidechain?: boolean;
   isMeta?: boolean;
+  /** Set on records a fork replayed out of an earlier session — see parser.ts. */
+  forkedFrom?: { sessionId?: string; messageUuid?: string };
   isCompactSummary?: boolean;
   isApiErrorMessage?: boolean;
   sourceToolUseID?: string;
@@ -197,7 +199,15 @@ export function loadAgentTree(agentId: string): AgentTree | null {
   for (const line of raw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    try { entries.push(JSON.parse(t) as RawEntry); } catch { /* skip malformed */ }
+    try {
+      const e = JSON.parse(t) as RawEntry;
+      // Replayed pre-fork history belongs to the session that produced it, and
+      // is already shown in full under that run. Keeping it here would make the
+      // tree's call and prompt counts disagree with the Usage tab, which skips
+      // the same records.
+      if (e.forkedFrom) continue;
+      entries.push(e);
+    } catch { /* skip malformed */ }
   }
 
   const stats: AgentTreeStats = {

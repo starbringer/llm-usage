@@ -6,6 +6,8 @@
 - [Accuracy notes](#accuracy-notes)
 - [Database](#database)
 - [Cost estimation](#cost-estimation)
+- [Plan weight](#plan-weight)
+- [Context occupancy](#context-occupancy)
 
 ## Run / Agent / Turn
 
@@ -28,11 +30,26 @@ limitation.
 ## Accuracy notes
 
 **Token dedupe.** Claude Code writes one JSONL line per *content block* of a
-response, and every line repeats the same `usage` numbers. Turns are deduplicated
-by the response's `message.id`, so each API call is counted exactly once. Without
-that dedupe, real transcripts over-count output tokens by roughly 2.4× (more for
-sessions with heavy tool use). All totals, charts and cost estimates use the
-deduplicated numbers.
+response, and a forked session replays its parent's history into a new
+transcript. Turns are therefore deduplicated **globally** on `request_id ??
+message_id` — the same key, in the same preference order, that Claude Code's own
+usage scan uses. Without content-block dedupe, transcripts over-count output by
+roughly 2.4×; without global dedupe, every call made before a fork is counted
+twice, and sub-agent forking is on by default from Claude Code 2.1.232.
+
+**Forked records.** A replayed record keeps the original `message.id`,
+`requestId` and `usage`, and carries `forkedFrom`. Those records are skipped
+outright — turns and events alike — so the session that actually spent the
+tokens keeps them. The fork's own new activity carries no `forkedFrom` and is
+counted normally.
+
+**Partial usage.** The repeated lines of one response are not always identical: a
+streamed response can record a partial `output_tokens` on its first line and the
+complete figure on its last, and a trailing record can carry an all-zero usage
+block. Token columns take the **maximum** across a response's lines, since a
+partial is always a prefix of the final count. Claude Code's own local scan keeps
+the first line instead, so its `/usage` activity panel reads slightly low on
+output — about 27k tokens across 36 of 1,569 responses in one measured week.
 
 **Failed calls.** Error echoes recorded with model `<synthetic>` are excluded from
 counts and from the model list; they appear in the session tree as error nodes.
@@ -47,9 +64,16 @@ with IDE/framework wrapper tags stripped.
 records carrying only a total are attributed to the 5m bucket (the default TTL) so
 cost is not overstated.
 
+**Attribution.** Claude Code stamps `attributionSkill`, `attributionAgent`,
+`attributionPlugin` and `attributionMcpServer` on every API call made while that
+component is active. Those fields set the call's cost bucket and drive the
+per-skill and per-server totals, so "what did this skill cost" means the whole
+span it ran for, not the single call that invoked it. Records written before the
+fields existed fall back to classifying a call by its own `tool_use` blocks.
+
 **Recorded vs estimated.** Fire counts, tool calls and skill invocations come from
 the parsed event stream — they are recorded, not inferred. Anything labelled *est.*
-in the UI (MCP/skill token usage, injected prompt cost) is a tokenizer estimate.
+in the UI (injected prompt cost, tool payload sizes) is a tokenizer estimate.
 
 ## Database
 
@@ -61,7 +85,7 @@ column for multi-source support.
 | **`files`** | one transcript file | path + byte offset, for incremental parsing |
 | **`runs`** | one logical run | derived roll-up: title, cwd, agent count, turn count, first/last seen, plus `run_key` (below). Rebuilt after every full scan **and** every incremental ingest (debounced), so the Runs page stays live without a restart |
 | **`agents`** | one transcript file | `run_id`, `parent_agent_id`, `parent_turn_index` (sibling ordering), `agent_type`, `description` (from sub-agent `meta.json`), title, cwd, last seen, turn count |
-| **`turns`** | one API call | **unique on (agent_id, message_id)** — this index is what deduplicates the one-line-per-content-block format. Carries model, token counts, timestamp, and a `bucket` column (0 = base, 1 = MCP, 2 = skill, assigned at parse time from the call's `tool_use` blocks; sub-agent attribution uses `is_subagent`) |
+| **`turns`** | one API call | **unique on `dedupe_key`** (`request_id ?? message_id`), globally — this index is what collapses both the one-line-per-content-block format and a fork's replayed history. Carries model, token counts, timestamp, the four `attribution_*` columns, and a `bucket` column (0 = base, 1 = MCP, 2 = skill, taken from attribution and falling back to the call's `tool_use` blocks; sub-agent attribution uses `is_subagent`) |
 | **`events`** | one parsed event | idempotent on (agent_id, source uuid): user prompts, tool calls (with tool name and `tool_use_id`), hook fires, API errors, compactions, model fallbacks. Tool events also carry an estimated token size and, for Skill calls, the skill name |
 | **`harness_snapshots`** | one harness fingerprint | append-only, written only when the fingerprint changes. Component hashes and token counts — never file contents — for instruction files, skills, commands, hooks, MCP servers, permissions and settings layers |
 
@@ -146,3 +170,38 @@ If you are on a Pro/Max subscription these numbers tell you what the same work
 would have cost through the API — they are not what you are charged. Anthropic
 provides no programmatic API for subscription seat usage; see
 <https://claude.ai/settings/usage> for that.
+
+## Plan weight
+
+Subscription rate limits are not metered in dollars. Each call scores
+
+```
+(cache_read + input×10 + cache_write×12.5 + output×50) × tier
+tier: fable 10, opus 5, haiku 1, anything else 3
+```
+
+which is the API price ratio with a cache read as the unit, and the tier is the
+family's input price per 1M. Plan weight and API cost are therefore the same
+quantity up to a constant: **1 USD = 10,000,000 weight units**, wherever the two
+tables agree.
+
+They disagree in two places, both deliberate:
+
+- a 1-hour cache write bills at 2× input but is weighted at 1.25×, so 1h-cache-heavy
+  work costs more in dollars than it consumes in quota;
+- the tier is per family, so it misses per-model rates the pricing table does carry
+  (legacy Opus 4.x at $15/1M, Sonnet 5 introductory at $2/1M).
+
+Weight is computed from the rate card, not derived from cost, so editing
+`pricing.json` does not change what the plan meter is reported to count.
+
+## Context occupancy
+
+`/context` totals the input side of the most recent API call — `input +
+cache_creation + cache_read` — against the model's window. Every run reports the
+same figure from its own turns: `context.lastTokens` for the latest call and
+`context.peakTokens` for the high-water mark that compaction resets. Sub-agent
+turns are excluded, since each runs its own window.
+
+The window size itself is not recorded in transcripts, so occupancy is reported
+in tokens rather than as a percentage.

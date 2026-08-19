@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DB_PATH } from "./paths";
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 11;
 
 let _db: Database | null = null;
 
@@ -35,7 +35,8 @@ export function getDb(): Database {
   return _db;
 }
 
-function initSchema(db: Database): void {
+/** Exported so tests exercise the production schema, indexes included. */
+export function initSchema(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS files (
     path             TEXT PRIMARY KEY,
     provider         TEXT NOT NULL,
@@ -101,6 +102,7 @@ function initSchema(db: Database): void {
     parent_agent_id  TEXT,
     message_id       TEXT,
     request_id       TEXT,
+    dedupe_key       TEXT,
     ts               TEXT NOT NULL,
     model            TEXT,
     input_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -110,22 +112,44 @@ function initSchema(db: Database): void {
     output_tokens    INTEGER NOT NULL DEFAULT 0,
     service_tier     TEXT,
     raw_offset       INTEGER,
-    bucket           INTEGER NOT NULL DEFAULT 0
+    bucket           INTEGER NOT NULL DEFAULT 0,
+    attribution_skill       TEXT,
+    attribution_agent       TEXT,
+    attribution_plugin      TEXT,
+    attribution_mcp_server  TEXT
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_turns_agent ON turns(agent_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_turns_run   ON turns(run_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_turns_ts    ON turns(ts)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model)`);
-  // One row per API response: Claude Code writes one JSONL line per content
-  // block, all sharing the same message.id and repeating the same usage.
-  // Without this dedupe every token count would be multiplied by the block
-  // count (~2.4x observed).
-  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_msg ON turns(agent_id, message_id)`);
+  // One row per API response, deduplicated GLOBALLY rather than per agent.
+  //
+  // Two distinct sources of repeats have to collapse here:
+  //   1. Claude Code writes one JSONL line per content block of a response, all
+  //      sharing the same message.id and repeating the same usage. Per-agent
+  //      dedupe already handled this (~2.4x over-count without it).
+  //   2. A forked session replays the parent's history into a NEW transcript,
+  //      keeping the original message.id / requestId but changing sessionId.
+  //      Those copies land under a different agent_id, so a per-agent index
+  //      lets every pre-fork call be counted twice. Subagent forking is on by
+  //      default from Claude Code 2.1.232, which makes that the common case.
+  //
+  // `dedupe_key` is request_id ?? message_id — the same preference order
+  // Claude Code's own usage scan uses. A row with neither stays NULL and is
+  // never deduplicated, which also matches its behaviour (its scan skips the
+  // dedupe set entirely for records with an empty key).
+  // Scoped by provider like every other table here: two sources could hand out
+  // the same simple id, and an unscoped index would silently merge their rows.
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_dedupe ON turns(provider, dedupe_key)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_turns_msg ON turns(agent_id, message_id)`);
   // `bucket` classifies each API call for cost attribution (0=base, 1=mcp,
   // 2=skill; sub-agent turns are attributed by is_subagent instead). Assigned
-  // at parse time from the call's tool_use blocks; conflicts keep the highest
+  // at parse time, preferring Claude Code's own `attribution*` fields and
+  // falling back to the call's tool_use blocks; conflicts keep the highest
   // priority seen across the response's lines.
+  db.run(`CREATE INDEX IF NOT EXISTS idx_turns_attr_skill ON turns(attribution_skill)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_turns_attr_mcp   ON turns(attribution_mcp_server)`);
 
   // Lightweight event stream extracted from transcripts: real user prompts,
   // tool calls, hook fires, API errors, compactions, model fallbacks.

@@ -16,6 +16,9 @@ conversation and configuration name replaced by consistent stand-ins — see
 - **Token trend chart** — split into input, output, cache write and cache read
 - **Below that** — usage by model, top projects, **MCP token usage** (per-server, with a per-tool tooltip), **skill token usage**, **cache hit rate** with a 50% guide line, **model mix**, and **top 10 runs** (click a bar to jump into that run)
 
+The MCP and skill bars measure the tokens spent *while* each server or skill was
+active, not the size of the call that invoked it — the tooltip shows both.
+
 ![Dashboard charts](screenshots/02-dashboard-charts.png)
 
 Every ranked bar chart reads largest-first, top down; the run-detail donut starts on
@@ -68,8 +71,8 @@ deduplicated data as the dashboard.
 
 ![Run detail — usage](screenshots/05-run-detail-usage.png)
 
-- KPI cards, a cumulative spend curve and a per-model table
-- **Cost-by-bucket donut** — base / MCP / skills / sub-agents, every API call classified at parse time from its tool calls
+- KPI cards — cost, **plan usage** in rate-limit weight units, output, cache read, LLM calls, and **context occupancy** (last call / peak) — plus a cumulative spend curve and a per-model table
+- **Cost-by-bucket donut** — base / MCP / skills / sub-agents, every API call classified at parse time from the provider's own attribution
 - **Tuning advice** from this run's real numbers — *"re-priced at a cheaper model these calls would cost $X (Y%) less"*, low cache-hit warnings, sub-agent-heavy runs
 
 ## Harness

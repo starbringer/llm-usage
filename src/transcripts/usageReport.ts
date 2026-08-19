@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { computeCost } from "../pricing";
+import { computeCost, computePlanWeight } from "../pricing";
 
 // ============================================================================
 // Per-run usage breakdown for the run-detail "Usage" tab.
@@ -8,7 +8,8 @@ import { computeCost } from "../pricing";
 // (one row per API call), so the numbers match the dashboard exactly —
 // unlike tools that re-sum every raw transcript line and over-count 2-4×.
 // Buckets: sub-agent turns → "subagents"; main-agent turns classified at
-// parse time from their tool calls (skill > mcp > base).
+// parse time from the provider's own attribution of the call, falling back to
+// its tool calls for older records (skill > mcp > base).
 // ============================================================================
 
 export type UsageBucket = "base" | "mcp" | "skills" | "subagents";
@@ -20,6 +21,22 @@ export interface BucketRollup {
   cacheCreate: number;
   cacheRead: number;
   costUsd: number;
+  /** Rate-limit units, in Claude Code's own weighting — see pricing.ts. */
+  planWeight: number;
+}
+
+/**
+ * Context-window occupancy for a run, in the same terms `/context` reports:
+ * the input side of one API call (input + cache write + cache read), which is
+ * exactly what that command totals.
+ */
+export interface ContextOccupancy {
+  /** Occupancy of the run's most recent call — what `/context` would show now. */
+  lastTokens: number;
+  /** Highest occupancy reached, which compaction resets. */
+  peakTokens: number;
+  /** Model of the most recent call, since the window size depends on it. */
+  model: string | null;
 }
 
 export interface RunUsageReport {
@@ -28,6 +45,8 @@ export interface RunUsageReport {
   total: BucketRollup;
   byModel: (BucketRollup & { model: string })[];
   byBucket: Record<UsageBucket, BucketRollup>;
+  /** What `/context` reports for this session, recomputed from its own calls. */
+  context: ContextOccupancy;
   /** Per API call, chronological — the UI draws the cumulative spend curve. */
   series: { ts: string; bucket: UsageBucket; model: string; costUsd: number; output: number }[];
   advice: UsageAdvice[];
@@ -41,7 +60,7 @@ export interface UsageAdvice {
 }
 
 export const emptyRollup = (): BucketRollup =>
-  ({ tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0 });
+  ({ tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0, planWeight: 0 });
 
 export const emptyBuckets = (): Record<UsageBucket, BucketRollup> => ({
   base: emptyRollup(), mcp: emptyRollup(), skills: emptyRollup(), subagents: emptyRollup(),
@@ -86,7 +105,7 @@ export function getRunUsage(db: Database, runId: string): RunUsageReport | null 
   const byModelMap = new Map<string, BucketRollup>();
   const series: RunUsageReport["series"] = [];
 
-  const add = (roll: BucketRollup, r: TurnRow, cost: number) => {
+  const add = (roll: BucketRollup, r: TurnRow, cost: number, weight: number) => {
     const cw = r.cache_create_5m + r.cache_create_1h;
     roll.input += r.input_tokens;
     roll.output += r.output_tokens;
@@ -94,18 +113,32 @@ export function getRunUsage(db: Database, runId: string): RunUsageReport | null 
     roll.cacheRead += r.cache_read;
     roll.tokens += r.input_tokens + r.output_tokens + cw + r.cache_read;
     roll.costUsd += cost;
+    roll.planWeight += weight;
   };
+
+  const context: ContextOccupancy = { lastTokens: 0, peakTokens: 0, model: null };
 
   for (const r of rows) {
     const model = r.model ?? "unknown";
     const cost = computeCost(model, r.input_tokens, r.output_tokens,
       r.cache_create_5m, r.cache_create_1h, r.cache_read).total;
+    const weight = computePlanWeight(model, r.input_tokens, r.output_tokens,
+      r.cache_create_5m, r.cache_create_1h, r.cache_read);
     const bucket = bucketOf(r);
-    add(total, r, cost);
-    add(byBucket[bucket], r, cost);
+    add(total, r, cost, weight);
+    add(byBucket[bucket], r, cost, weight);
     const m = byModelMap.get(model) ?? emptyRollup();
-    add(m, r, cost);
+    add(m, r, cost, weight);
     byModelMap.set(model, m);
+
+    // Occupancy is the INPUT side only: what the next request has to carry.
+    // Sub-agents run their own window, so they cannot speak for the run's.
+    if (!r.is_subagent) {
+      const occupancy = r.input_tokens + r.cache_create_5m + r.cache_create_1h + r.cache_read;
+      context.lastTokens = occupancy;
+      context.model = r.model;
+      if (occupancy > context.peakTokens) context.peakTokens = occupancy;
+    }
     series.push({ ts: r.ts, bucket, model, costUsd: cost, output: r.output_tokens });
   }
 
@@ -116,7 +149,7 @@ export function getRunUsage(db: Database, runId: string): RunUsageReport | null 
   return {
     runId,
     turnCount: rows.length,
-    total, byModel, byBucket, series,
+    total, byModel, byBucket, context, series,
     advice: buildAdvice(total, byModel, byBucket, rows),
     note: "Costs are API-equivalent estimates from your pricing table; buckets are attributed per API call.",
   };

@@ -113,3 +113,58 @@ export function computeCost(
   return { inputCost, outputCost, cacheWrite5mCost, cacheWrite1hCost, cacheReadCost,
     total: inputCost + outputCost + cacheWrite5mCost + cacheWrite1hCost + cacheReadCost };
 }
+
+// ============================================================================
+// Plan weight
+//
+// Subscription rate limits are not metered in dollars. Claude Code scores each
+// call as
+//
+//   (cache_read + input*10 + cache_write*12.5 + output*50) * tier
+//   tier: fable 10, opus 5, haiku 1, anything else 3
+//
+// which is the API price ratio with a cache read as the unit, and the tier is
+// the family's input price per 1M. So plan weight and API cost are the same
+// quantity up to a constant — `PLAN_WEIGHT_PER_USD` below — wherever the two
+// tables agree.
+//
+// They disagree in exactly two places, and both are deliberate:
+//   - a 1-hour cache write bills at 2x input but is weighted at 1.25x, so a
+//     1h-cache-heavy workload costs more in dollars than it consumes in quota;
+//   - the tier is per family, so it misses per-model rates the pricing table
+//     does carry (legacy Opus 4.x at $15/1M, Sonnet 5 introductory at $2/1M).
+//
+// Weight is therefore computed from the rate card rather than derived from
+// `computeCost`, so it keeps reporting what the plan meter counts even after
+// someone edits pricing.json.
+// ============================================================================
+
+/** Weight units per API-equivalent dollar, where the two tables agree. */
+export const PLAN_WEIGHT_PER_USD = 10_000_000;
+
+const CACHE_WRITE_WEIGHT_MULT = 12.5;
+
+/** Claude Code's model tier: the family's input price per 1M tokens. */
+export function planModelTier(model: string): number {
+  const m = (model ?? "").toLowerCase();
+  if (m.includes("fable") || m.includes("mythos")) return 10;
+  if (m.includes("opus")) return 5;
+  if (m.includes("haiku")) return 1;
+  return 3;
+}
+
+/**
+ * Rate-limit weight for one call, in Claude Code's own units. Divide by
+ * `PLAN_WEIGHT_PER_USD` to read it as "the dollars this would cost on the API".
+ */
+export function computePlanWeight(
+  model: string,
+  input: number,
+  output: number,
+  cw5m: number,
+  cw1h: number,
+  cr: number,
+): number {
+  return (cr + input * 10 + (cw5m + cw1h) * CACHE_WRITE_WEIGHT_MULT + output * 50)
+    * planModelTier(model);
+}

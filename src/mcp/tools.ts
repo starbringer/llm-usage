@@ -341,7 +341,7 @@ export const MCP_TOOLS: McpToolDef[] = [
     name: "get_run_usage",
     title: "Session cost breakdown",
     description:
-      "Cost breakdown for one run: totals, per-model rollup, and per-call attribution into base / MCP / skills / sub-agents buckets, plus concrete tuning advice computed from this run's real numbers. The most useful single tool for explaining why a session was expensive.",
+      "Cost breakdown for one run: totals, per-model rollup, and per-call attribution into base / MCP / skills / sub-agents buckets, plus concrete tuning advice computed from this run's real numbers. Every rollup also carries `planWeight`, the subscription rate-limit units the work consumed, and `context` reports the session's context-window occupancy the way /context does. The most useful single tool for explaining why a session was expensive.",
     inputSchema: {
       type: "object",
       properties: {
@@ -505,7 +505,7 @@ export const MCP_TOOLS: McpToolDef[] = [
     name: "get_mcp_usage",
     title: "MCP token usage",
     description:
-      "Estimated tokens injected by each configured MCP server's tool calls over the range, with a per-tool breakdown. Use it to find servers that cost context without earning it.",
+      "Per configured MCP server over the range: `attributedTokens` / `attributedCostUsd` are the API cost recorded while that server was active — the number that says what it is worth keeping — while `tokens` and the per-tool breakdown size only the call and result payloads. Use it to find servers that cost context without earning it.",
     inputSchema: {
       type: "object",
       properties: { ...providerProp, ...rangeProp },
@@ -514,14 +514,14 @@ export const MCP_TOOLS: McpToolDef[] = [
     handler: args => ({
       range: rangeOf(args),
       servers: getMcpUsage(getDb(), rangeSinceIso(rangeOf(args)), providerFilter(args)),
-      note: "Tokens are a chars/4 estimate of each call's input plus result payload.",
+      note: "`attributedTokens` and `attributedCostUsd` are recorded per API call from the provider's own attribution. `tokens` is a chars/4 estimate of each call's input plus result payload.",
     }),
   },
   {
     name: "get_skill_usage",
     title: "Skill token usage",
     description:
-      "Recorded skill invocations and their estimated injected tokens over the range. Zero-call skills are absent here — cross-reference list_skills to find skills that never fire.",
+      "Skills over the range with `attributedTokens` / `attributedCostUsd` — every API call made while the skill was running, not just the call that invoked it. `calls` and `tokens` cover the invocation itself. Zero-call skills are absent here — cross-reference list_skills to find skills that never fire.",
     inputSchema: {
       type: "object",
       properties: { ...providerProp, ...rangeProp },
@@ -530,6 +530,7 @@ export const MCP_TOOLS: McpToolDef[] = [
     handler: args => ({
       range: rangeOf(args),
       skills: getSkillUsage(getDb(), rangeSinceIso(rangeOf(args)), providerFilter(args)),
+      note: "`attributedTokens` is what ran under the skill; `tokens` is the injected body of the invocation.",
     }),
   },
   {

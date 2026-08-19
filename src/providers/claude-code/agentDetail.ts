@@ -98,6 +98,7 @@ export function loadAgentDetail(agentId: string): DetailTurn[] {
     uuid: string;
     timestamp: string;
     isMeta?: boolean;
+    forkedFrom?: { sessionId?: string; messageUuid?: string };
     parentUuid?: string;
     message?: Record<string, unknown>;
     attachment?: { fileName?: string; filename?: string; path?: string };
@@ -109,6 +110,8 @@ export function loadAgentDetail(agentId: string): DetailTurn[] {
   for (const line of lines) {
     try {
       const e = JSON.parse(line) as RawEntry;
+      // See agentTree: a fork's replayed history is not this session's work.
+      if (e.forkedFrom) continue;
       if (e.type === "user" || e.type === "assistant") {
         entries.push(e);
       } else if (e.type === "attachment" && e.parentUuid) {

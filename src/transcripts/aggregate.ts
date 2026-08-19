@@ -319,6 +319,14 @@ export interface McpUsageStat {
   calls: number;
   tokens: number;
   tools: { tool: string; calls: number; tokens: number }[];
+  /**
+   * What the API actually charged while this server was active, from the
+   * provider's per-call attribution — as opposed to `tokens`, which only sizes
+   * the request and response payloads of the calls themselves.
+   */
+  attributedCalls: number;
+  attributedTokens: number;
+  attributedCostUsd: number;
 }
 
 /**
@@ -333,6 +341,52 @@ export function splitMcpToolName(detail: string): { server: string; tool: string
     : { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
 }
 
+/**
+ * Recorded API cost per attribution value, from the provider's own per-call
+ * `attribution*` fields rather than from tool payload sizes.
+ *
+ * The two answer different questions and the difference is large: invoking a
+ * skill costs the tokens of one tool call, while RUNNING it costs every API
+ * call made until it finishes. Only this second number tells you what a skill
+ * or server is worth keeping.
+ */
+function attributedCost(
+  db: Database, which: "skill" | "mcpServer",
+  since: string, provider?: ProviderFilter,
+): Map<string, { calls: number; tokens: number; costUsd: number }> {
+  // Resolved through a fixed map rather than interpolated from the argument:
+  // the column name cannot be a bound parameter, so this is what keeps a
+  // future caller from reaching the SQL text with a value of its own.
+  const column = ({ skill: "attribution_skill", mcpServer: "attribution_mcp_server" } as const)[which];
+  const params: BindParams = [since];
+  const provAnd = providerAnd(provider, params);
+  const rows = db.query<{
+    name: string; model: string | null; calls: number;
+    input: number; cw5m: number; cw1h: number; cr: number; out: number;
+  }, BindParams>(
+    `SELECT ${column} as name, model,
+            COUNT(*)             as calls,
+            SUM(input_tokens)    as input,
+            SUM(cache_create_5m) as cw5m,
+            SUM(cache_create_1h) as cw1h,
+            SUM(cache_read)      as cr,
+            SUM(output_tokens)   as out
+     FROM turns
+     WHERE ${column} IS NOT NULL AND ts >= ?${provAnd}
+     GROUP BY ${column}, model`
+  ).all(...params);
+
+  const out = new Map<string, { calls: number; tokens: number; costUsd: number }>();
+  for (const r of rows) {
+    const e = out.get(r.name) ?? { calls: 0, tokens: 0, costUsd: 0 };
+    e.calls += r.calls;
+    e.tokens += r.input + r.cw5m + r.cw1h + r.cr + r.out;
+    e.costUsd += computeCost(r.model ?? "unknown", r.input, r.out, r.cw5m, r.cw1h, r.cr).total;
+    out.set(r.name, e);
+  }
+  return out;
+}
+
 export function getMcpUsage(db: Database, since: string, provider?: ProviderFilter): McpUsageStat[] {
   const params: BindParams = [since];
   const provAnd = providerAnd(provider, params);
@@ -344,35 +398,71 @@ export function getMcpUsage(db: Database, since: string, provider?: ProviderFilt
   ).all(...params);
 
   const byServer = new Map<string, McpUsageStat>();
+  const blank = (server: string): McpUsageStat =>
+    ({ server, calls: 0, tokens: 0, tools: [],
+       attributedCalls: 0, attributedTokens: 0, attributedCostUsd: 0 });
   for (const r of rows) {
     const { server, tool } = splitMcpToolName(r.detail);
-    const entry = byServer.get(server) ?? { server, calls: 0, tokens: 0, tools: [] };
+    const entry = byServer.get(server) ?? blank(server);
     entry.calls += r.calls;
     entry.tokens += r.tokens ?? 0;
     entry.tools.push({ tool, calls: r.calls, tokens: r.tokens ?? 0 });
     byServer.set(server, entry);
   }
+  // A server can hold attributed cost with no recorded tool call of its own —
+  // the attribution covers the whole span, not just the invoking call.
+  for (const [name, a] of attributedCost(db, "mcpServer", since, provider)) {
+    const entry = byServer.get(name) ?? blank(name);
+    entry.attributedCalls = a.calls;
+    entry.attributedTokens = a.tokens;
+    entry.attributedCostUsd = a.costUsd;
+    byServer.set(name, entry);
+  }
   return [...byServer.values()]
     .map(s => ({ ...s, tools: s.tools.sort((a, b) => b.tokens - a.tokens) }))
-    .sort((a, b) => b.tokens - a.tokens);
+    .sort((a, b) => (b.attributedTokens - a.attributedTokens) || (b.tokens - a.tokens));
 }
 
 export interface SkillUsageStat {
   skill: string;
   calls: number;
   tokens: number;
+  /** See McpUsageStat — recorded API cost, not injected payload size. */
+  attributedCalls: number;
+  attributedTokens: number;
+  attributedCostUsd: number;
 }
 
 export function getSkillUsage(db: Database, since: string, provider?: ProviderFilter): SkillUsageStat[] {
   const params: BindParams = [since];
   const provAnd = providerAnd(provider, params);
-  return db.query<SkillUsageStat, BindParams>(
+  const rows = db.query<{ skill: string; calls: number; tokens: number }, BindParams>(
     `SELECT extra as skill, COUNT(*) as calls, SUM(tokens) as tokens
      FROM events
      WHERE kind = 'tool' AND detail = 'Skill' AND extra IS NOT NULL AND ts >= ?${provAnd}
-     GROUP BY extra
-     ORDER BY tokens DESC`
+     GROUP BY extra`
   ).all(...params);
+
+  const bySkill = new Map<string, SkillUsageStat>();
+  const blank = (skill: string): SkillUsageStat =>
+    ({ skill, calls: 0, tokens: 0, attributedCalls: 0, attributedTokens: 0, attributedCostUsd: 0 });
+  for (const r of rows) {
+    const e = bySkill.get(r.skill) ?? blank(r.skill);
+    e.calls += r.calls;
+    e.tokens += r.tokens ?? 0;
+    bySkill.set(r.skill, e);
+  }
+  // Skills invoked by a sub-agent, or loaded without a Skill tool call, appear
+  // only here — the event stream never saw an invocation to hang them on.
+  for (const [name, a] of attributedCost(db, "skill", since, provider)) {
+    const e = bySkill.get(name) ?? blank(name);
+    e.attributedCalls = a.calls;
+    e.attributedTokens = a.tokens;
+    e.attributedCostUsd = a.costUsd;
+    bySkill.set(name, e);
+  }
+  return [...bySkill.values()]
+    .sort((a, b) => (b.attributedTokens - a.attributedTokens) || (b.tokens - a.tokens));
 }
 
 export function getCacheHitRate(db: Database, sinceDate?: string, provider?: ProviderFilter): number {
