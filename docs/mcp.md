@@ -132,11 +132,11 @@ look further back. `get_usage_summary` reports the window as `retentionDays`, an
 | `get_project_usage` | Totals, run and agent counts per project directory |
 | `list_runs` | Paginated session list (`limit`, `offset`, `project`, `search`), each row carrying its `run_key` |
 | `get_run` | One run with all its agents |
-| `get_run_usage` | Per-run cost breakdown by bucket and model, **plus rendered tuning advice** |
+| `get_run_usage` | Per-run cost breakdown by bucket and model, with plan weight and context occupancy, **plus rendered tuning advice** |
 | `get_top_runs` | Sessions ranked by tokens |
 | `get_top_turns` | The largest individual API calls |
-| `get_mcp_usage` | Estimated tokens per MCP server, with a per-tool breakdown |
-| `get_skill_usage` | Recorded skill invocations and their injected tokens |
+| `get_mcp_usage` | Tokens and cost recorded while each MCP server was active, with a per-tool payload breakdown |
+| `get_skill_usage` | Tokens and cost recorded while each skill was running, plus its invocation count |
 | `list_agents` | Agents with model, turn count and token totals |
 
 ### Change impact

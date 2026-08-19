@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { computeCost } from "../pricing";
+import { computeCost, computePlanWeight } from "../pricing";
 import {
   bucketFor, emptyBuckets, emptyRollup,
   getRunUsage, type BucketRollup, type UsageBucket,
@@ -132,6 +132,7 @@ export function periodSide(db: Database, f: SideFilter): SideMetrics {
 
   for (const r of rows) {
     const cost = computeCost(r.model, r.input, r.out, r.cw5m, r.cw1h, r.cr).total;
+    const weight = computePlanWeight(r.model, r.input, r.out, r.cw5m, r.cw1h, r.cr);
     const cw = r.cw5m + r.cw1h;
     const groupTotal = r.input + r.out + cw + r.cr;
 
@@ -151,6 +152,7 @@ export function periodSide(db: Database, f: SideFilter): SideMetrics {
       roll.cacheRead += r.cr;
       roll.tokens += groupTotal;
       roll.costUsd += cost;
+      roll.planWeight += weight;
     };
     apply(byBucket[bucketFor(r.is_subagent, r.bucket)]);
     const m = byModelMap.get(r.model) ?? emptyRollup();

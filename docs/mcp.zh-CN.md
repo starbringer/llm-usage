@@ -121,11 +121,11 @@ bun run mcp        # = bun run mcp-stdio.ts
 | `get_project_usage` | 按项目目录的总量、运行数与智能体数 |
 | `list_runs` | 分页会话列表（`limit`、`offset`、`project`、`search`），每行带有 `run_key` |
 | `get_run` | 单次运行及其全部智能体 |
-| `get_run_usage` | 单次运行按分类桶与模型的成本拆解，**外加已渲染成文字的调优建议** |
+| `get_run_usage` | 单次运行按分类桶与模型的成本拆解，含套餐权重与上下文占用，**外加已渲染成文字的调优建议** |
 | `get_top_runs` | 按 token 排序的会话 |
 | `get_top_turns` | 开销最大的单次 API 调用 |
-| `get_mcp_usage` | 每个 MCP 服务器的估算 token，含按工具拆分 |
-| `get_skill_usage` | 已记录的技能调用及其注入 token |
+| `get_mcp_usage` | 每个 MCP 服务器活跃期间记录到的 token 与成本，含按工具的载荷拆分 |
+| `get_skill_usage` | 每个技能运行期间记录到的 token 与成本，以及它的调用次数 |
 | `list_agents` | 智能体及其模型、回合数与 token 总量 |
 
 ### 改进效果

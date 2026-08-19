@@ -189,10 +189,10 @@ describe("buildDrivers", () => {
     tokens: { input: tokens, cacheCreate5m: 0, cacheCreate1h: 0, cacheRead: 0, output: 0, total: tokens },
     turnCount: turns, runCount: 1, agentCount: 1, cacheHitRatePct: 0,
     byModel: [], byBucket: {
-      base: { tokens, input: tokens, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: cost },
-      mcp: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0 },
-      skills: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0 },
-      subagents: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0 },
+      base: { tokens, input: tokens, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: cost, planWeight: 0 },
+      mcp: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0, planWeight: 0 },
+      skills: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0, planWeight: 0 },
+      subagents: { tokens: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, costUsd: 0, planWeight: 0 },
     },
     costPerRun: cost, costPerTurn: cost / turns, tokensPerTurn: tokens / turns,
   });

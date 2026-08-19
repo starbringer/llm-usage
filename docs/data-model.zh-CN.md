@@ -6,6 +6,8 @@
 - [准确性说明](#准确性说明)
 - [数据库](#数据库)
 - [成本估算](#成本估算)
+- [套餐权重](#套餐权重)
+- [上下文占用](#上下文占用)
 
 ## Run / Agent / Turn
 
@@ -25,10 +27,21 @@
 
 ## 准确性说明
 
-**Token 去重。** Claude Code 会为响应的每个 *content block* 写一行 JSONL，而每一行都
-重复着同样的 `usage` 数字。回合按响应的 `message.id` 去重，因此每次 API 调用恰好只
-计一次。若不做去重，真实转录文件的输出 token 会被高估约 2.4 倍（工具调用密集的会话
-更多）。所有总量、图表和成本估算用的都是去重后的数字。
+**Token 去重。** Claude Code 会为响应的每个 *content block* 写一行 JSONL，而 fork 出
+的会话会把父会话的历史原样重放进一个新的转录文件。因此回合按 `request_id ??
+message_id` 做**全局**去重 —— 与 Claude Code 自己的用量扫描所用的键和优先级完全一致。
+不做 content block 去重，输出 token 会被高估约 2.4 倍；不做全局去重，fork 之前的每次
+调用都会被计两次，而子代理 fork 从 Claude Code 2.1.232 起默认开启。
+
+**Fork 记录。** 被重放的记录保留原始的 `message.id`、`requestId` 和 `usage`，并带上
+`forkedFrom`。这类记录会被直接跳过 —— 回合和事件都是 —— 于是真正花掉这些 token 的
+会话保留它们。fork 自身的新活动不带 `forkedFrom`，正常计入。
+
+**部分用量。** 同一响应的多行并不总是一致：流式响应可能在第一行记录部分
+`output_tokens`，到最后一行才是完整值，末尾还可能出现一条全零的 usage 记录。因此
+token 列取一个响应各行中的**最大值** —— 部分值必然是最终值的前缀。Claude Code 自己
+的本地扫描取的是第一行，所以它 `/usage` 活动面板的输出数偏低 —— 实测某一周内，
+1,569 次响应中有 36 次、合计约 27k token。
 
 **失败的调用。** 以模型 `<synthetic>` 记录的错误回显不计入统计，也不进入模型列表；
 它们在会话树中显示为错误节点。
@@ -41,9 +54,15 @@
 **缓存写入 TTL。** 5m/1h 的拆分来自 `usage.cache_creation`。仅带总量的历史记录会被
 归入 5m 桶（默认 TTL），以免高估成本。
 
+**归因。** Claude Code 会在该组件活跃期间的每一次 API 调用上打上 `attributionSkill`、
+`attributionAgent`、`attributionPlugin` 和 `attributionMcpServer`。这些字段决定调用的
+成本桶，并驱动按 skill、按服务器的合计，因此"这个 skill 花了多少"指的是它运行的整段
+跨度，而不是触发它的那一次调用。这些字段出现之前写下的记录，回退到按调用自身的
+`tool_use` 块分类。
+
 **记录值 vs 估算值。** 触发次数、工具调用和 skill 调用来自解析后的事件流 —— 是实际
-记录的，不是推断的。UI 中任何标注 *est.* 的数字（MCP/skill token 用量、注入提示词
-成本）都是分词器估算值。
+记录的，不是推断的。UI 中任何标注 *est.* 的数字（注入提示词成本、工具载荷大小）都是
+分词器估算值。
 
 ## 数据库
 
@@ -55,7 +74,7 @@ SQLite，位于 `data/cache.db`，WAL 模式。共六张表，每张都带一个
 | **`files`** | 一个转录文件 | 路径 + 字节偏移，用于增量解析 |
 | **`runs`** | 一次逻辑运行 | 派生的汇总：标题、工作目录、智能体数、回合数、首次/最后出现时间，以及 `run_key`（见下）。每次全量扫描**以及**每次增量摄入（防抖）后都会重建，因此 Runs 页面无需重启即可保持实时 |
 | **`agents`** | 一个转录文件 | `run_id`、`parent_agent_id`、`parent_turn_index`（同级排序）、`agent_type`、`description`（来自子智能体的 `meta.json`）、标题、工作目录、最后出现时间、回合数 |
-| **`turns`** | 一次 API 调用 | **(agent_id, message_id) 唯一** —— 正是这个索引消除了"每个 content block 一行"格式带来的重复。携带模型、token 计数、时间戳，以及 `bucket` 列（0 = 基础，1 = MCP，2 = skill，解析时根据该次调用的 `tool_use` 块判定；子智能体归属用 `is_subagent`） |
+| **`turns`** | 一次 API 调用 | **`dedupe_key`（`request_id ?? message_id`）全局唯一** —— 正是这个索引同时消除了"每个 content block 一行"格式和 fork 重放历史带来的重复。携带模型、token 计数、时间戳、四个 `attribution_*` 列，以及 `bucket` 列（0 = 基础，1 = MCP，2 = skill，取自归因，回退到该次调用的 `tool_use` 块；子智能体归属用 `is_subagent`） |
 | **`events`** | 一个已解析事件 | 按 (agent_id, 源 uuid) 幂等：用户提示词、工具调用（含工具名与 `tool_use_id`）、hook 触发、API 错误、上下文压缩、模型回退。工具事件还携带估算的 token 体积，Skill 调用另带 skill 名称 |
 | **`harness_snapshots`** | 一份 harness 指纹 | 只追加，且仅在指纹发生变化时写入。记录指令文件、技能、命令、hook、MCP 服务器、权限与设置层的组件哈希与 token 数 —— 绝不记录文件内容 |
 
@@ -124,3 +143,34 @@ turn 的新智能体也不会被误判为过期数据。
 如果你用的是 Pro/Max 订阅，这些数字告诉你同样的工作走 API 会花多少钱 —— 它们不是你
 实际被收取的金额。Anthropic 没有提供查询订阅席位用量的程序化 API；那部分请见
 <https://claude.ai/settings/usage>。
+
+## 套餐权重
+
+订阅速率限制不是按美元计量的。每次调用的计分是
+
+```
+(cache_read + input×10 + cache_write×12.5 + output×50) × tier
+tier：fable 10，opus 5，haiku 1，其余 3
+```
+
+这就是以一次缓存读取为单位的 API 价格比例，而 tier 即该系列每 1M 的输入价格。因此在
+两张表一致的地方，套餐权重与 API 成本是同一个量，只差一个常数：**1 美元 =
+10,000,000 权重单位**。
+
+两者有两处不一致，都是有意为之：
+
+- 1 小时缓存写入按输入价 2× 计费，但只按 1.25× 计权，所以 1h 缓存密集的工作花的钱
+  多于它消耗的额度；
+- tier 按系列划分，因此漏掉了价格表确实收录的按模型费率（旧版 Opus 4.x 每 1M 15 美元、
+  Sonnet 5 首发价每 1M 2 美元）。
+
+权重由费率卡计算，而非从成本推导，所以编辑 `pricing.json` 不会改变所报告的套餐计量口径。
+
+## 上下文占用
+
+`/context` 统计的是最近一次 API 调用的输入侧 —— `input + cache_creation +
+cache_read` —— 并对照模型的窗口。每个运行都会从自己的回合算出同一个数字：
+`context.lastTokens` 是最近一次调用，`context.peakTokens` 是被压缩重置的最高水位。
+子智能体的回合被排除，因为它们各自运行在自己的窗口里。
+
+窗口大小本身不记录在转录文件中，因此占用以 token 数报告，而非百分比。

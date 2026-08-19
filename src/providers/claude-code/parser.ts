@@ -45,6 +45,17 @@ interface RawLine {
   error?: { status?: number; formatted?: string; message?: string };
   originalModel?: string;
   fallbackModel?: string;
+  /**
+   * Present only on records a fork copied out of an earlier session. Claude
+   * Code spreads the original record, overwrites sessionId/parentUuid and
+   * stamps this — message.id, requestId and usage all survive unchanged.
+   */
+  forkedFrom?: { sessionId?: string; messageUuid?: string };
+  /** The provider's own attribution of the call (see TurnRecord). */
+  attributionSkill?: string;
+  attributionAgent?: string;
+  attributionPlugin?: string;
+  attributionMcpServer?: string;
   message?: {
     id?: string;
     role?: string;
@@ -213,6 +224,26 @@ function processLine(
 ): void {
   if (!line.type) return;
 
+  // A forked session opens with a verbatim replay of its parent's history.
+  // Those records describe API calls and tool runs that were paid for in the
+  // ORIGINAL session, so counting them again here would inflate every total by
+  // the whole pre-fork conversation. The fork's own new activity carries no
+  // `forkedFrom` and is counted normally.
+  //
+  // Descriptive fields still come through: a fork whose first parsed chunk is
+  // all replay would otherwise write an all-NULL agent row, and because
+  // `titleSet` latches on any later incremental pass (see ctx init) that row
+  // could never acquire a title afterwards. A fork does inherit its parent's
+  // opening prompt and working directory, so taking them here is also correct.
+  if (line.forkedFrom) {
+    if (line.cwd && !ctx.cwd) ctx.cwd = line.cwd;
+    if (line.type === "user" && !ctx.titleSet && !line.isMeta && line.message?.content) {
+      const t = extractTitle(line.message.content);
+      if (t) { ctx.title = t; ctx.titleSet = true; }
+    }
+    return;
+  }
+
   const emit = (kind: "prompt" | "tool" | "hook" | "api_error" | "compact" | "fallback",
                 detail: string | null, dedupe: string,
                 extras?: { tool_use_id?: string | null; tokens?: number; extra?: string | null }) => {
@@ -334,11 +365,20 @@ function processLine(
       ?? (u.cache_creation_input_tokens ?? 0);
     const cw1h = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
 
-    // Cost-attribution bucket from this line's tool_use blocks. Lines of the
-    // same message.id may carry different blocks — insertTurn keeps the
-    // highest priority seen (skill > mcp > base).
+    // Cost-attribution bucket, preferring the provider's own attribution.
+    //
+    // The tool_use scan below only ever caught the single call that INVOKED a
+    // skill or MCP tool, not the calls that carry its cost — a skill that
+    // injects a large body and drives twenty follow-up turns showed up as one
+    // turn. Claude Code stamps `attribution*` on every call made while the
+    // component is active, which is the quantity "what did this skill cost"
+    // actually needs. The scan stays as a fallback for records written before
+    // those fields existed. `attributionAgent` is not consulted: it appears
+    // only on sidechain lines, which is_subagent already classifies.
     let bucket = 0;
-    if (Array.isArray(line.message.content)) {
+    if (line.attributionSkill) bucket = 2;
+    else if (line.attributionMcpServer) bucket = 1;
+    else if (Array.isArray(line.message.content)) {
       for (const b of line.message.content as Record<string, unknown>[]) {
         if (b["type"] !== "tool_use") continue;
         const name = String(b["name"] ?? "");
@@ -365,6 +405,10 @@ function processLine(
       service_tier: u.service_tier ?? null,
       raw_offset: rawOffset,
       bucket,
+      attribution_skill: line.attributionSkill ?? null,
+      attribution_agent: line.attributionAgent ?? null,
+      attribution_plugin: line.attributionPlugin ?? null,
+      attribution_mcp_server: line.attributionMcpServer ?? null,
     });
     ctx.turnCount++;
   }

@@ -501,13 +501,21 @@ function renderProjectsChart(projects) {
   });
 }
 
-// Shared renderer for the MCP / Skill usage cards: horizontal bars of
-// estimated tokens with call counts, plus an in-chart empty state.
+// Shared renderer for the MCP / Skill usage cards: horizontal bars of the
+// tokens actually spent under each component, plus an in-chart empty state.
+// Recorded attributed tokens and chars/4 payload estimates differ by orders of
+// magnitude, so the axis carries one or the other, never a mix: if any row in
+// the range has attribution, every bar is attributed tokens. The tooltip always
+// shows both figures.
 function renderUsageBarChart(chartId, rows, color, emptyText, tooltipFor) {
   const chart = initChart(chartId);
   if (!chart) return;
   if (!rows?.length) return renderChartEmpty(chart, emptyText);
-  const top = largestOnTop(rows.slice(0, 10));
+  const attributed = rows.some(r => (r.attributedTokens ?? 0) > 0);
+  const withValue = rows
+    .map(r => ({ ...r, value: (attributed ? r.attributedTokens : r.tokens) ?? 0 }))
+    .sort((a, b) => b.value - a.value);
+  const top = largestOnTop(withValue.slice(0, 10));
   chart.setOption({
     ...baseOption(),
     grid: { left: 6, right: 76, top: 8, bottom: 8, containLabel: true },
@@ -515,7 +523,7 @@ function renderUsageBarChart(chartId, rows, color, emptyText, tooltipFor) {
     yAxis: { type: 'category', data: top.map(r => r.name), axisLabel: { color: COLOR.dim, fontSize: 11 } },
     series: [{
       type: 'bar', barMaxWidth: 22,
-      data: top.map(r => r.tokens),
+      data: top.map(r => r.value),
       itemStyle: { color },
       label: { show: true, position: 'right', formatter: p => fmt.tokens(p.value), color: COLOR.dim, fontSize: 10 },
     }],
@@ -532,8 +540,12 @@ function renderMcpUsageChart(servers) {
     s => {
       const toolLines = (s.tools ?? []).slice(0, 8)
         .map(t => `${esc(t.tool)}: ${t.calls} call${t.calls !== 1 ? 's' : ''} · ${fmt.tokens(t.tokens)}`);
+      const spent = s.attributedTokens
+        ? `${fmt.tokens(s.attributedTokens)} tokens spent while active · $${(s.attributedCostUsd ?? 0).toFixed(2)}`
+        : null;
       return [`<b>${esc(s.server)}</b>`,
-              `${s.calls} call${s.calls !== 1 ? 's' : ''} · ~${fmt.tokens(s.tokens)} tokens (est.)`,
+              ...(spent ? [spent] : []),
+              `${s.calls} call${s.calls !== 1 ? 's' : ''} · ~${fmt.tokens(s.tokens)} tokens of payload (est.)`,
               ...toolLines].join('<br>');
     });
 }
@@ -544,7 +556,12 @@ function renderSkillUsageChart(skills) {
     (skills ?? []).map(s => ({ ...s, name: s.skill })),
     COLOR.green,
     'No skill invocations in this range',
-    s => `<b>${esc(s.skill)}</b><br>${s.calls} invocation${s.calls !== 1 ? 's' : ''} · ~${fmt.tokens(s.tokens)} tokens (est.)`);
+    s => [`<b>${esc(s.skill)}</b>`,
+          ...(s.attributedTokens
+            ? [`${fmt.tokens(s.attributedTokens)} tokens spent while running · $${(s.attributedCostUsd ?? 0).toFixed(2)}`]
+            : []),
+          `${s.calls} invocation${s.calls !== 1 ? 's' : ''} · ~${fmt.tokens(s.tokens)} tokens injected (est.)`,
+         ].join('<br>'));
 }
 
 function renderTopRunsChart(runs) {
@@ -1362,11 +1379,15 @@ async function loadRunUsage() {
 
 function renderRunUsage(r) {
   const el = document.getElementById('sd-usage-view');
+  const ctx = r.context ?? { lastTokens: 0, peakTokens: 0 };
   const kpis = [
     { label: 'Est. cost (API-equiv)', value: `$${r.total.costUsd.toFixed(2)}` },
+    { label: 'Plan usage',            value: fmt.tokens(r.total.planWeight ?? 0) + ' wt' },
     { label: 'Output tokens',         value: fmt.tokens(r.total.output) },
     { label: 'Cache read',            value: fmt.tokens(r.total.cacheRead) },
     { label: 'LLM calls',             value: String(r.turnCount) },
+    { label: 'Context (last / peak)',
+      value: `${fmt.tokens(ctx.lastTokens)} / ${fmt.tokens(ctx.peakTokens)}` },
   ];
 
   const modelRows = r.byModel.map(m => `<tr>
